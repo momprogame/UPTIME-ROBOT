@@ -3,26 +3,28 @@ import aiohttp
 import time
 from datetime import datetime
 from pyrogram import Client, filters
-from pyrogram.types import Message, InlineKeyboardMarkup, InlineKeyboardButton
+from pyrogram.types import Message
 from pyrogram.enums import ParseMode
+import uvloop  # Optional: for better performance
 
 from config import API_ID, API_HASH, BOT_TOKEN, OWNER_ID, MONITOR_INTERVAL
 from database import Database
 
-# Inicializar cliente y base de datos
-app = Client(
-    "web_monitor_bot",
-    api_id=API_ID,
-    api_hash=API_HASH,
-    bot_token=BOT_TOKEN
-)
+# Optional: Install uvloop for better performance
+try:
+    import uvloop
+    uvloop.install()
+    print("✓ uvloop installed for better performance")
+except ImportError:
+    print("⚠ uvloop not installed (optional)")
 
+# Initialize database
 db = Database()
 
-# Variable para controlar el monitoreo
+# Variable to control monitoring
 is_monitoring = True
 
-# Decorador para verificar si el usuario es el owner
+# Owner-only decorator
 def owner_only(func):
     async def wrapper(client, message: Message):
         if message.from_user.id != OWNER_ID:
@@ -30,6 +32,14 @@ def owner_only(func):
             return
         return await func(client, message)
     return wrapper
+
+# Create client without starting it yet
+app = Client(
+    "web_monitor_bot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
 
 @app.on_message(filters.command("start"))
 async def start_command(client, message: Message):
@@ -57,7 +67,6 @@ async def help_command(client, message: Message):
 @owner_only
 async def add_website(client, message: Message):
     try:
-        # Parsear el comando: /add https://ejemplo.com Mi Web
         parts = message.text.split(maxsplit=2)
         if len(parts) < 3:
             await message.reply("❌ Uso incorrecto.\nEjemplo: `/add https://ejemplo.com Mi Página Web`")
@@ -66,11 +75,9 @@ async def add_website(client, message: Message):
         url = parts[1]
         name = parts[2]
         
-        # Validar URL básica
         if not url.startswith(("http://", "https://")):
             url = "https://" + url
         
-        # Añadir a la base de datos
         success = await db.add_website(url, name, message.from_user.id)
         
         if success:
@@ -113,6 +120,24 @@ async def check_status_now(client, message: Message):
     await message.reply("🔍 Verificando estado de todos los websites...")
     await check_all_websites(client, manual=True)
 
+@app.on_message(filters.command("stop"))
+@owner_only
+async def stop_monitoring(client, message: Message):
+    global is_monitoring
+    is_monitoring = False
+    await message.reply("⏹️ Monitoreo detenido. Usa /start_monitor para reanudar.")
+
+@app.on_message(filters.command("start_monitor"))
+@owner_only
+async def start_monitoring(client, message: Message):
+    global is_monitoring
+    if not is_monitoring:
+        is_monitoring = True
+        await message.reply("▶️ Monitoreo reanudado.")
+        asyncio.create_task(monitoring_loop())
+    else:
+        await message.reply("✅ El monitoreo ya está activo.")
+
 async def check_website(session, website_id: int, url: str, name: str) -> dict:
     """Verifica el estado de un website"""
     start_time = time.time()
@@ -125,7 +150,7 @@ async def check_website(session, website_id: int, url: str, name: str) -> dict:
                 "url": url,
                 "name": name,
                 "status": status,
-                "response_time": round(response_time * 1000, 2),  # en ms
+                "response_time": round(response_time * 1000, 2),
                 "status_code": response.status
             }
     except asyncio.TimeoutError:
@@ -161,19 +186,15 @@ async def check_all_websites(client, manual: bool = False):
         
         results = await asyncio.gather(*tasks)
         
-        # Procesar resultados y notificar cambios
         for result in results:
             website_id = result["id"]
             current_status = result["status"]
             response_time = result["response_time"]
             
-            # Guardar resultado
             await db.save_monitoring_result(website_id, current_status, response_time or 0)
             
-            # Obtener último estado
             last_status = await db.get_last_status(website_id)
             
-            # Si el estado cambió (y no es la primera verificación), notificar
             if last_status and last_status != current_status and not manual:
                 status_emoji = "✅" if current_status == "online" else "❌"
                 message = f"""
@@ -188,15 +209,15 @@ async def check_all_websites(client, manual: bool = False):
                 if result.get("error"):
                     message += f"\n*Error:* {result['error']}"
                 
-                await client.send_message(OWNER_ID, message, parse_mode=ParseMode.MARKDOWN)
+                try:
+                    await client.send_message(OWNER_ID, message, parse_mode=ParseMode.MARKDOWN)
+                except Exception as e:
+                    print(f"Error sending notification: {e}")
 
 async def monitoring_loop():
     """Bucle principal de monitoreo"""
     global is_monitoring
-    await app.start()
-    
-    # Notificar inicio
-    await app.send_message(OWNER_ID, "🚀 *Bot de monitoreo iniciado*\nMonitoreando websites cada minuto.", parse_mode=ParseMode.MARKDOWN)
+    print("✓ Monitoring loop started")
     
     while is_monitoring:
         try:
@@ -208,40 +229,52 @@ async def monitoring_loop():
             except:
                 pass
         
-        # Esperar el intervalo
         await asyncio.sleep(MONITOR_INTERVAL)
 
-@app.on_message(filters.command("stop"))
-@owner_only
-async def stop_monitoring(client, message: Message):
+async def main():
+    """Función principal asíncrona"""
     global is_monitoring
-    is_monitoring = False
-    await message.reply("⏹️ Monitoreo detenido. Usa /start_monitor para reanudar.")
+    
+    print("🚀 Iniciando bot de monitoreo...")
+    
+    # Iniciar el cliente
+    await app.start()
+    print("✓ Bot client started")
+    
+    # Notificar inicio
+    try:
+        await app.send_message(
+            OWNER_ID, 
+            "🚀 *Bot de monitoreo iniciado*\nMonitoreando websites cada minuto.", 
+            parse_mode=ParseMode.MARKDOWN
+        )
+        print("✓ Startup notification sent")
+    except Exception as e:
+        print(f"⚠ Could not send startup notification: {e}")
+    
+    # Iniciar el bucle de monitoreo
+    is_monitoring = True
+    monitor_task = asyncio.create_task(monitoring_loop())
+    
+    # Mantener el bot corriendo
+    try:
+        # Idle forever
+        await asyncio.Event().wait()
+    except KeyboardInterrupt:
+        print("\n⏹ Stopping bot...")
+    finally:
+        is_monitoring = False
+        monitor_task.cancel()
+        await app.stop()
 
-@app.on_message(filters.command("start_monitor"))
-@owner_only
-async def start_monitoring(client, message: Message):
-    global is_monitoring
-    if not is_monitoring:
-        is_monitoring = True
-        await message.reply("▶️ Monitoreo reanudado.")
-        asyncio.create_task(monitoring_loop())
-    else:
-        await message.reply("✅ El monitoreo ya está activo.")
-
-def main():
-    """Función principal"""
-    print("Iniciando bot de monitoreo...")
-    
-    # Crear tarea de monitoreo en segundo plano
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-    
-    # Iniciar el cliente y el monitoreo
-    loop.create_task(monitoring_loop())
-    
-    # Iniciar el bot
-    app.run()
+def run_bot():
+    """Función para ejecutar el bot"""
+    try:
+        asyncio.run(main())
+    except KeyboardInterrupt:
+        print("\n⏹ Bot stopped by user")
+    except Exception as e:
+        print(f"❌ Fatal error: {e}")
 
 if __name__ == "__main__":
-    main()
+    run_bot()
