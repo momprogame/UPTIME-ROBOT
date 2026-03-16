@@ -2,5 +2,5 @@ pyrogram==2.0.106
 aiohttp==3.9.1
 aiosqlite==0.19.0
 python-dotenv==1.0.0
-uvloop==0.19.0  # Optional for better performance
-tgcrypto==1.2.5  # Optional for better performance
+tgcrypto==1.2.5
+uvloop==0.19.0
